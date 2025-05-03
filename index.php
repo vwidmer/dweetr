@@ -1,6 +1,6 @@
 <?php
 // =============================================================================
-// IOT Dweeter v2504170900 
+// IOT Dweetr v2505031630
 // – A lightweight message board for machine-to-machine communication
 // Website: https://dweetr.io
 // - by DeepThought.ws
@@ -19,32 +19,15 @@ $user    = 'db_username';
 $pass    = 'db_password';
 $charset = 'utf8mb4';
 
-// Build the DSN (Data Source Name) for PDO to connect to MySQL with the specified charset.
 $dsn = "mysql:host=$host;dbname=$db;charset=$charset";
-
-// PDO options for robust error handling and predictable fetch behavior.
-// - ERRMODE_EXCEPTION: Fail fast with exceptions on error.
-// - DEFAULT_FETCH_MODE: Return associative arrays for better clarity.
 $options = [
     PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
 ];
 
 try {
-    // ========================================================================
-    // Connect to the MariaDB database using PDO.
-    // ========================================================================
     $pdo = new PDO($dsn, $user, $pass, $options);
-    
-    // Set the MySQL session timezone to UTC so that built-in functions (e.g., NOW())
-    // generate UTC-based timestamps – matching our PHP configuration.
     $pdo->exec("SET time_zone = '+00:00'");
-    
-    // ========================================================================
-    // Ensure the existence of the 'dweets' table.
-    // The table will be auto-created if it doesn't exist, using InnoDB engine
-    // and supporting full unicode (utf8mb4) for extended character sets.
-    // ========================================================================
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS dweets (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -56,7 +39,6 @@ try {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     ");
 } catch(PDOException $e) {
-    // If the connection fails, output a JSON error response – no HTML or stack traces leaking.
     header('Content-Type: application/json');
     echo json_encode(['status' => 'error', 'message' => 'Database connection failed']);
     exit;
@@ -328,7 +310,7 @@ function showHomePage($pdo) {
 </head>
 <body>
 <div class="container">
-    <h1>Welcome to IOT dweeter</h1>
+    <h1>Welcome to IOT dweetr</h1>
     <p>Simple machine-to-machine messaging over HTTP. No setup. No auth. Just post and get lightweight JSON.</p>
     <h2>Quick Start</h2>
     <h3>Send a message:</h3>
@@ -341,6 +323,8 @@ function showHomePage($pdo) {
     <pre>curl -N "http://' . $_SERVER['HTTP_HOST'] . '/listen/for/dweets/from/my-thing-name"</pre>
     <h3>Realtime updates in browser:</h3>
     <pre>http://' . $_SERVER['HTTP_HOST'] . '/realtime.html?thing=my-thing-name</pre>
+    <h3>Follow a dweet with graphing:</h3>
+    <pre>curl "http://' . $_SERVER['HTTP_HOST'] . '/follow/my-thing-name"</pre>    
     <h3>Send a private dweet, JSON will return unique token:</h3>
     <pre>curl "http://' . $_SERVER['HTTP_HOST'] . '/dweet/for/my-thing-name?temp=23&private=1"</pre>
     <h3>Fetch the latest private dweet:</h3>
@@ -361,13 +345,187 @@ function showHomePage($pdo) {
     exit;
 }
 
+// Add this function to render the follow page with complete history graphs
+function showFollowPage($pdo, $thing) {
+    // Fetch the complete history for this thing in ascending order (oldest first)
+    $stmt = $pdo->prepare("SELECT * FROM dweets WHERE thing = ? AND is_private = 0 ORDER BY id ASC");
+    $stmt->execute([$thing]);
+    $dweets = $stmt->fetchAll();
+
+    header('Content-Type: text/html');
+    echo '<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>' . htmlspecialchars($thing) . ' - dweetr.io</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; background: #f7f7f7; }
+        .header { background: #2196f3; color: #fff; padding: 30px 20px 10px 20px; }
+        .header h1 { margin: 0; }
+        .container { max-width: 900px; margin: 30px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 30px; }
+        .tab-btn { background: #f7f7f7; border: none; padding: 10px 30px; font-size: 1.1em; cursor: pointer; }
+        .tab-btn.active { background: #fff; border-bottom: 2px solid #2196f3; font-weight: bold; }
+        .chart-div { margin-bottom: 40px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>IOT dweetr - ' . htmlspecialchars($thing) . '</h1>
+    <p>Complete history for this thing</p>
+    <div>
+        <button class="tab-btn active" id="visualBtn" onclick="showVisual()">Visual</button>
+        <button class="tab-btn" id="rawBtn" onclick="showRaw()">Raw</button>
+    </div>
+    <div id="visualView">
+        <!-- A unified container to output each field in the order it first appears -->
+        <div id="fieldsContainer"></div>
+    </div>
+    <div id="rawView" style="display:none;">
+        <pre id="rawJson"></pre>
+    </div>
+</div>
+<script>
+// Pass the complete history from PHP
+let dweets = ' . json_encode($dweets) . ';
+
+// Create a unified container where all fields (graphs or dropdowns) will be appended
+let fieldsContainer = document.getElementById("fieldsContainer");
+
+// Build an array of keys in the order they first appear across all dweets
+let orderedKeys = [];
+dweets.forEach(dw => {
+    let content = JSON.parse(dw.content);
+    Object.keys(content).forEach(key => {
+        if (orderedKeys.indexOf(key) === -1) {
+            orderedKeys.push(key);
+        }
+    });
+});
+
+// For each key in the union (ordered by its first appearance)
+orderedKeys.forEach(key => {
+    // Determine the type of this field by using the first occurrence where it is defined.
+    let firstValue = null;
+    for (let i = 0; i < dweets.length; i++) {
+        let content = JSON.parse(dweets[i].content);
+        if (content[key] !== undefined) {
+            firstValue = content[key];
+            break;
+        }
+    }
+    
+    if (firstValue !== null && !isNaN(firstValue)) {
+        // Numeric field: Create a chart.
+        let chartDiv = document.createElement("div");
+        chartDiv.className = "chart-div";
+        
+        let title = document.createElement("h3");
+        title.textContent = key;
+        chartDiv.appendChild(title);
+        
+        let canvas = document.createElement("canvas");
+        canvas.id = "chart-" + key;
+        canvas.height = 80;
+        chartDiv.appendChild(canvas);
+        fieldsContainer.appendChild(chartDiv);
+        
+        // Extract labels and values for this numeric field from all dweets.
+        let labels = [];
+        let values = [];
+        dweets.forEach(dw => {
+            let content = JSON.parse(dw.content);
+            if (content[key] !== undefined && !isNaN(content[key])) {
+                labels.push(dw.created_at);
+                values.push(Number(content[key]));
+            }
+        });
+        
+        if (labels.length > 0) {
+            let ctx = canvas.getContext("2d");
+            new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: key,
+                        data: values,
+                        borderColor: "#2196f3",
+                        backgroundColor: "rgba(33,150,243,0.1)",
+                        fill: true,
+                        tension: 0.2
+                    }]
+                },
+                options: {
+                    scales: {
+                        x: { display: true, title: { display: true, text: "Time" } },
+                        y: { display: true, title: { display: true, text: key } }
+                    }
+                }
+            });
+        }
+    } else {
+        // Non-numeric field: Create a dropdown menu.
+        let div = document.createElement("div");
+        div.style.marginBottom = "20px";
+        
+        let label = document.createElement("label");
+        label.textContent = key;
+        label.style.display = "block";
+        label.style.fontWeight = "bold";
+        div.appendChild(label);
+        
+        let select = document.createElement("select");
+        select.style.width = "100%";
+        select.style.padding = "5px";
+        
+        // For each dweet display an option with its timestamp and the corresponding value.
+        dweets.forEach(dw => {
+            let content = JSON.parse(dw.content);
+            if (content[key] !== undefined && isNaN(content[key])) {
+                let option = document.createElement("option");
+                option.text = dw.created_at + " - " + content[key];
+                select.appendChild(option);
+            }
+        });
+        
+        div.appendChild(select);
+        fieldsContainer.appendChild(div);
+    }
+});
+
+// Toggle views between Visual and Raw
+function showVisual() {
+    document.getElementById("visualView").style.display = "";
+    document.getElementById("rawView").style.display = "none";
+    document.getElementById("visualBtn").classList.add("active");
+    document.getElementById("rawBtn").classList.remove("active");
+}
+function showRaw() {
+    document.getElementById("visualView").style.display = "none";
+    document.getElementById("rawView").style.display = "";
+    document.getElementById("visualBtn").classList.remove("active");
+    document.getElementById("rawBtn").classList.add("active");
+    document.getElementById("rawJson").textContent = JSON.stringify(dweets, null, 2);
+}
+</script>
+</body>
+</html>';
+    exit;
+}
+
+
 // =============================================================================
-// ROUTING: Determine endpoint by analyzing the request URI
+// ROUTING: Add this route before the fallback
 // =============================================================================
 
-// Parse the request path (excluding query parameters) and split it into components.
 $route = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-$parts = explode('/', trim($route, '/')); // Remove any leading/trailing slashes
+$parts = explode('/', trim($route, '/'));
+
+if ($parts[0] === 'follow' && isset($parts[1])) {
+    $thing = $parts[1];
+    showFollowPage($pdo, $thing);
+}
 
 // ----------------------------------------------------------------------------
 // Default route: When no specific endpoint is requested, show the home page
